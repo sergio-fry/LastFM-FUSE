@@ -1,76 +1,246 @@
 require 'net/http'
 require 'open-uri'
 require 'fusefs'
+require 'fileutils'
 require 'vkontakte'
 
 require 'rubygems'
 require 'scrobbler'
+require 'rubygems'
+require 'dm-core'
 
 module LastFM
   module FUSE
 
-    class Track
-      attr_reader :artist, :name
-      def initialize(artist, name)
-        @artist = artist
-        @name = name
-      end
+    class Tag
+      include DataMapper::Resource
 
-      def file_name
-        "#{@artist} - #{@name}.mp3"
-      end
+      property :id,         Serial
+      property :name,      String
+      has n, :tracks
 
-      def content
-        Net::HTTP.get_response(URI.parse(url)).body
-      end
-
-      def size
-        unless @size
-          response = nil
-          uri = URI.parse(url)
-          Net::HTTP.start(uri.host, uri.port) {|http| response = http.head(uri.path)}
-          @size = response.content_length
+      def load_tracks
+        number = 0
+        Scrobbler::Tag.new(name).top_tracks[0..20].each do |lastfm_track|
+          number = number + 1
+          Thread.new do
+            track = Track.new(:tag_id => id, :artist => lastfm_track.artist, :name => lastfm_track.name, :file_name => "%02d. #{lastfm_track.artist} - #{lastfm_track.name}.mp3" % number)
+            track.save
+            track.load rescue track.destroy!
+          end
         end
-
-        @size 
-      end
-
-      def url
-        @url ||= Vkontakte::Tracker.new.find("#{@artist} - #{@name}")
-        @url
       end
     end
 
-    class Dir
-      def initialize
-        @tracks = {}
-        tag = Scrobbler::Tag.new('disco')
-        tag.top_tracks[0..50].each do |lastfm_track|
-          track = Track.new(lastfm_track.artist, lastfm_track.name)
-          @tracks[track.file_name] = track
+    class Track
+      include DataMapper::Resource
+
+      property :id,         Serial
+      property :artist,      String
+      property :name,      String
+      property :file_name,      String
+      property :loaded,      Boolean, :default => false
+      belongs_to :tag
+
+      before :destroy do
+
+      end
+
+      def content
+        IO.read("#{Dir.data_path}/tracks/#{id}")
+      end
+
+      def size
+        if loaded && File.file?("#{Dir.data_path}/tracks/#{id}")
+          File.size("#{Dir.data_path}/tracks/#{id}")
+        else
+          0
         end
       end
 
+      def url
+        @url ||= Vkontakte::Tracker.new.find("#{artist} - #{name}")
+        @url
+      end
+
+      def load
+        f = File.new("#{Dir.data_path}/tracks/#{id}", "w")
+        f.write(Net::HTTP.get_response(URI.parse(url)).body)
+        self.loaded = true
+        save
+      end
+
+    end
+
+    
+    class Dir
+      def initialize params = {}
+        @@data_path = File.expand_path(params[:data_path])
+        FileUtils.mkdir_p(@@data_path)
+        FileUtils.mkdir_p(@@data_path + "/tracks")
+        @@database_path = @@data_path + "/database.sqlite3"
+
+        DataMapper::Logger.new($stdout, :debug)
+        DataMapper.setup(:default, "sqlite3:#{@@database_path}")
+
+
+        unless File.file? @@database_path
+          Tag.auto_migrate!
+          Track.auto_migrate!
+        end
+      end
+
+      def self.data_path
+        @@data_path
+      end
+
       def contents(path)
-        @tracks.keys
+        parts = path.split('/')
+        parts.shift
+        case parts[0]
+        when 'Artists'
+          [] if parts.size == 1
+        when 'Tags'
+          if parts.size == 1
+            Tag.all.map(&:name)
+          elsif parts.size == 2
+            Tag.first(:name => parts[1]).tracks.all(:loaded => true).map(&:file_name)
+          else
+            []
+          end
+        when nil
+          ['Tags', 'Artists']
+        else
+          []
+        end
+      end
+
+      def directory?(path)
+        parts = path.split('/')
+        parts.shift
+        case parts[0]
+        when 'Artists'
+          if parts.size == 1
+            true
+          else
+            false
+          end
+        when 'Tags'
+          if parts.size == 1
+            true
+          elsif parts.size == 2
+            Tag.count(:name => parts[1]) == 1
+          else
+            false
+          end
+        else
+          false
+        end
       end
 
       def file?(path)
-        @tracks.has_key?(path.split('/').last)
+        parts = path.split('/')
+        parts.shift
+        case parts[0]
+        when 'Artists'
+          false
+        when 'Tags'
+          if parts.size == 3
+            Tag.first(:name => parts[1]).tracks.all(:loaded => true).map(&:file_name).include?(parts[2])
+          else
+            false
+          end
+        else
+          false
+        end
       end
 
       def read_file(path)
-        @tracks[path.split('/').last].content
+        parts = path.split('/')
+        parts.shift
+        case parts[0]
+        when 'Tags'
+          if parts.size == 3
+            Tag.first(:name => parts[1]).tracks.first(:file_name => parts[2]).content
+          else
+            ''
+          end
+        else
+          ''
+        end
       end
 
       def size(path)
-        @tracks[path.split('/').last].size
+        parts = path.split('/')
+        parts.shift
+        case parts[0]
+        when 'Tags'
+          if parts.size == 3
+            Tag.first(:name => parts[1]).tracks.first(:file_name => parts[2]).size
+          else
+            0
+          end
+        else
+          0
+        end
+      end
+
+      def can_mkdir?(path)
+        parts = path.split('/')
+        parts.shift
+        case parts[0]
+        when 'Tags'
+          true if parts.size == 2
+        else
+          false
+        end
+      end
+
+      def can_rmdir?(path)
+        parts = path.split('/')
+        parts.shift
+        case parts[0]
+        when 'Tags'
+          true if parts.size == 2
+        else
+          false
+        end
+      end
+
+
+      def rmdir(path)
+        parts = path.split('/')
+        parts.shift
+        case parts[0]
+        when 'Tags'
+          tag = Tag.first(:name => parts[1])
+          tag.tracks.each{|t| t.destroy}
+          tag.destroy
+        else
+        end
+      end
+
+      def mkdir(path)
+        parts = path.split('/')
+        parts.shift
+        case parts[0]
+        when 'Tags'
+          tag = Tag.new(:name => parts[1])
+          tag.save
+
+          Thread.abort_on_exception = true
+          Thread.new do
+            tag.load_tracks
+            tag.save
+          end
+        else
+        end
       end
     end
   end
 end
 
-hellodir = LastFM::FUSE::Dir.new
+hellodir = LastFM::FUSE::Dir.new(:data_path => "/tmp/lastfm")
 FuseFS.set_root( hellodir )
 
 # Mount under a directory given on the command line.

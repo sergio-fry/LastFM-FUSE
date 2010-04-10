@@ -18,7 +18,8 @@ module Vkontakte
       path = "http://api.vk.com/api.php?api_id=%s&count=200&v=2.0&method=audio.search&sig=%s&test_mode=1&q=%s" % [@app_id, make_sig('audio.search', q), URI.escape(q)]
 
       doc = open(path) { |f| Hpricot(f) }
-      mp3_url = (doc/:response/:audio/:url).first.inner_text
+
+      mp3_url = (doc/:response/:audio/:url).first.inner_text rescue nil
       mp3_url
     end
 
