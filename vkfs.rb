@@ -7,7 +7,7 @@ require 'vkontakte'
 require 'rubygems'
 require 'scrobbler'
 require 'rubygems'
-require 'dm-core'
+require 'dm-more'
 
 module LastFM
   module FUSE
@@ -16,7 +16,8 @@ module LastFM
       include DataMapper::Resource
 
       property :id,         Serial
-      property :name,      String
+      property :name,      String, :required => true, :unique => true
+
       has n, :tracks
 
       def load_tracks
@@ -36,14 +37,14 @@ module LastFM
       include DataMapper::Resource
 
       property :id,         Serial
-      property :artist,      String
-      property :name,      String
-      property :file_name,      String
+      property :artist,      String, :required => true
+      property :name,      String, :required => true
+      property :file_name,      String, :required => true
       property :loaded,      Boolean, :default => false
       belongs_to :tag
 
       before :destroy do
-
+        File.delete("#{Dir.data_path}/tracks/#{id}")
       end
 
       def content
@@ -129,7 +130,9 @@ module LastFM
           if parts.size == 1
             true
           elsif parts.size == 2
-            Tag.count(:name => parts[1]) == 1
+            p "DDDDDDDDDDDDDDDDDDDDDD"
+            #!Tag.find(:name => parts[1]).nil?
+            true
           else
             false
           end
@@ -226,12 +229,12 @@ module LastFM
         case parts[0]
         when 'Tags'
           tag = Tag.new(:name => parts[1])
-          tag.save
-
-          Thread.abort_on_exception = true
-          Thread.new do
-            tag.load_tracks
-            tag.save
+          if tag.save
+            Thread.abort_on_exception = true
+            Thread.new do
+              tag.load_tracks
+              tag.save
+            end
           end
         else
         end
